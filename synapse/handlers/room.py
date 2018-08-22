@@ -72,6 +72,7 @@ class RoomCreationHandler(BaseHandler):
 
         self.spam_checker = hs.get_spam_checker()
         self.event_creation_handler = hs.get_event_creation_handler()
+        self.room_member_handler = hs.get_room_member_handler()
 
     @defer.inlineCallbacks
     def create_room(self, requester, config, ratelimit=True,
@@ -164,28 +165,7 @@ class RoomCreationHandler(BaseHandler):
         visibility = config.get("visibility", None)
         is_public = visibility == "public"
 
-        # autogen room IDs and try to create it. We may clash, so just
-        # try a few times till one goes through, giving up eventually.
-        attempts = 0
-        room_id = None
-        while attempts < 5:
-            try:
-                random_string = stringutils.random_string(18)
-                gen_room_id = RoomID(
-                    random_string,
-                    self.hs.hostname,
-                )
-                yield self.store.store_room(
-                    room_id=gen_room_id.to_string(),
-                    room_creator_user_id=user_id,
-                    is_public=is_public
-                )
-                room_id = gen_room_id.to_string()
-                break
-            except StoreError:
-                attempts += 1
-        if not room_id:
-            raise StoreError(500, "Couldn't generate a room ID.")
+        room_id = yield self._generate_room_id(creator_id=user_id, is_public=is_public)
 
         if room_alias:
             directory_handler = self.hs.get_handlers().directory_handler
@@ -214,18 +194,15 @@ class RoomCreationHandler(BaseHandler):
         # override any attempt to set room versions via the creation_content
         creation_content["room_version"] = room_version
 
-        room_member_handler = self.hs.get_room_member_handler()
-
         yield self._send_events_for_new_room(
             requester,
             room_id,
-            room_member_handler,
             preset_config=preset_config,
             invite_list=invite_list,
             initial_state=initial_state,
             creation_content=creation_content,
             room_alias=room_alias,
-            power_level_content_override=config.get("power_level_content_override", {}),
+            power_level_content_override=config.get("power_level_content_override"),
             creator_join_profile=creator_join_profile,
         )
 
@@ -261,7 +238,7 @@ class RoomCreationHandler(BaseHandler):
             if is_direct:
                 content["is_direct"] = is_direct
 
-            yield room_member_handler.update_membership(
+            yield self.room_member_handler.update_membership(
                 requester,
                 UserID.from_string(invitee),
                 room_id,
@@ -299,14 +276,13 @@ class RoomCreationHandler(BaseHandler):
             self,
             creator,  # A Requester object.
             room_id,
-            room_member_handler,
             preset_config,
             invite_list,
             initial_state,
             creation_content,
-            room_alias,
-            power_level_content_override,
-            creator_join_profile,
+            room_alias=None,
+            power_level_content_override=None,
+            creator_join_profile=None,
     ):
         def create(etype, content, **kwargs):
             e = {
@@ -344,7 +320,7 @@ class RoomCreationHandler(BaseHandler):
             content=creation_content,
         )
 
-        yield room_member_handler.update_membership(
+        yield self.room_member_handler.update_membership(
             creator,
             creator.user,
             room_id,
@@ -386,7 +362,8 @@ class RoomCreationHandler(BaseHandler):
                 for invitee in invite_list:
                     power_level_content["users"][invitee] = 100
 
-            power_level_content.update(power_level_content_override)
+            if power_level_content_override:
+                power_level_content.update(power_level_content_override)
 
             yield send(
                 etype=EventTypes.PowerLevels,
@@ -424,6 +401,28 @@ class RoomCreationHandler(BaseHandler):
                 state_key=state_key,
                 content=content,
             )
+
+    @defer.inlineCallbacks
+    def _generate_room_id(self, creator_id, is_public):
+        # autogen room IDs and try to create it. We may clash, so just
+        # try a few times till one goes through, giving up eventually.
+        attempts = 0
+        while attempts < 5:
+            try:
+                random_string = stringutils.random_string(18)
+                gen_room_id = RoomID(
+                    random_string,
+                    self.hs.hostname,
+                ).to_string()
+                yield self.store.store_room(
+                    room_id=gen_room_id,
+                    room_creator_user_id=creator_id,
+                    is_public=is_public,
+                )
+                defer.returnValue(gen_room_id)
+            except StoreError:
+                attempts += 1
+        raise StoreError(500, "Couldn't generate a room ID.")
 
 
 class RoomContextHandler(object):
