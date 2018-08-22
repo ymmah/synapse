@@ -75,6 +75,62 @@ class RoomCreationHandler(BaseHandler):
         self.room_member_handler = hs.get_room_member_handler()
 
     @defer.inlineCallbacks
+    def clone_exiting_room(self, requester, old_room_id, new_room_version):
+        user_id = requester.user.to_string()
+
+        self.auth.check_auth_blocking(user_id)
+
+        if not self.spam_checker.user_may_create_room(user_id):
+            raise SynapseError(403, "You are not permitted to create rooms")
+
+        yield self.ratelimit(requester)
+
+        yield self.event_creation_handler.assert_accepted_privacy_policy(
+            requester,
+        )
+
+        if new_room_version not in KNOWN_ROOM_VERSIONS:
+            raise SynapseError(
+                400,
+                "Your homeserver does not support this room version",
+                Codes.UNSUPPORTED_ROOM_VERSION,
+            )
+
+        # XXX check alias is free
+        # canonical_alias = None
+
+        # XXX is_public
+        is_public = True
+        room_id = yield self._generate_room_id(creator_id=user_id, is_public=is_public)
+        logger.debug("Assigned new room id %s", room_id)
+
+        # XXX create association in directory handler
+        # XXX preset
+
+        preset_config = RoomCreationPreset.PRIVATE_CHAT
+
+        creation_content = {"room_version": new_room_version}
+
+        initial_state = OrderedDict()
+
+        yield self._send_events_for_new_room(
+            requester,
+            room_id,
+            preset_config=preset_config,
+            invite_list=[],
+            initial_state=initial_state,
+            creation_content=creation_content,
+        )
+
+        # XXX name
+        # XXX topic
+        # XXX invites/joins
+        # XXX 3pid invites
+        # XXX directory_handler.send_room_alias_update_event
+
+        defer.returnValue(room_id)
+
+    @defer.inlineCallbacks
     def create_room(self, requester, config, ratelimit=True,
                     creator_join_profile=None):
         """ Creates a new room.
